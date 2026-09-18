@@ -1,0 +1,820 @@
+---
+title: "Supply Chain Analytics with Vectors, Matrices, and Systems of Equations"
+subtitle: "DATA 605 Assignment 1"
+author: "Joao De Oliveira"
+date: "2026-09-09"
+format:
+  pdf:
+    documentclass: article
+    geometry:
+      - margin=1in
+    fontsize: 11pt
+    linestretch: 1.15
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    colorlinks: true
+    fig-pos: "H"
+    fig-align: center
+    highlight-style: github
+jupyter: python3
+execute:
+  echo: true
+  warning: false
+---
+
+# Introduction
+
+A retail company distributes product from three warehouses (A, B, and C)
+to three sales regions. Management has three questions. Can the current 
+inventory in the network cover projected regional demand? How is shipment 
+volume actually distributed across warehouses and regions? And how
+many additional truckloads should each warehouse send next week to enure there is
+no shortage?
+
+In this assignment I will answer the three questions using linear algebra rather 
+than spreadsheet arithmetic. Part A treats inventory and demand as vectors and 
+compares them per element to locate surplus and shortage. Part B represents shipment flows
+as a matrix, where row sums describe outbound volume per warehouse and column
+sums describe inbound volume per region. Part C expresses the restocking
+problem as a system of three linear equations and attempts to solve it in
+matrix form as $\mathbf{A}\mathbf{x} = \mathbf{b}$.
+
+# Setup and Data Access
+
+The three datasets live in a public GitHub repository I created and are read 
+directly over HTTPS rather than from a local folder. Nothing needs to be downloaded.
+
+
+```{python}
+#| label: setup
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from IPython.display import Markdown
+
+np.set_printoptions(suppress=True)  
+plt.rcParams["figure.dpi"] = 150
+```
+
+```{python}
+#| label: data-source
+RAW_BASE = ("https://raw.githubusercontent.com/JDO-MSDS/DATA-605/"
+            "refs/heads/main/Assignment1/")
+
+inventory_df = pd.read_csv(RAW_BASE + "inventory.csv")
+demand_df = pd.read_csv(RAW_BASE + "demand.csv")
+shipments_df = pd.read_csv(RAW_BASE + "shipments.csv")
+
+# labels from the data to allow new regions or warehouses 
+REGIONS = [c for c in inventory_df.columns if c != "Warehouse"]
+WAREHOUSES = inventory_df["Warehouse"].tolist()
+```
+
+## Source Data
+
+```{python}
+#| label: tbl-inventory
+#| tbl-cap: "Units on hand, by warehouse and region"
+Markdown(inventory_df.to_markdown(index=False))
+```
+
+```{python}
+#| label: tbl-demand
+#| tbl-cap: "Projected demand by region"
+Markdown(demand_df.to_markdown(index=False))
+```
+
+```{python}
+#| label: tbl-shipments
+#| tbl-cap: "Units shipped, by warehouse and region"
+Markdown(shipments_df.to_markdown(index=False))
+```
+
+# Part A: Inventory Analysis
+
+## Building the Vectors
+
+The inventory data forms a 3 X 3 matrix with warehouses on the rows and
+regions on the columns. Each column is a vector holding the stock 
+positioned for one region:
+
+$$
+\mathbf{I} =
+\begin{bmatrix}
+1200 & 900 & 800 \\
+1000 & 1100 & 700 \\
+900 & 700 & 1000
+\end{bmatrix}
+\qquad
+\mathbf{d} =
+\begin{bmatrix} 2800 \\ 2400 \\ 2500 \end{bmatrix}
+$$
+
+The demand vector is reindexed onto `REGIONS` rather than read in file order.
+The two CSVs happen to list the regions consistently, but nothing is enforcing
+that, and a mismatch would produce plausible-looking wrong answers instead of
+an error.
+
+```{python}
+#| label: build-vectors
+inventory_matrix = inventory_df[REGIONS].to_numpy()
+
+# align demand to the region column order by label
+demand_vector = demand_df.set_index("Region").loc[REGIONS, "Demand"].to_numpy()
+
+print("Inventory matrix (rows = A, B, C | cols = Region1, 2, 3):")
+print(inventory_matrix)
+print("\nDemand vector:", demand_vector)
+```
+
+## Total Inventory Available in Each Region
+
+Summing down each column collapses the warehouse dimension. This is the same
+operation as taking the dot product of each column with a vector of ones,
+computed below as a check:
+
+$$
+\mathbf{t} = \mathbf{I}^{\top}\mathbf{1}
+$$
+
+```{python}
+#| label: total-inventory
+total_inventory_by_region = inventory_matrix.sum(axis=0)
+
+ones = np.ones(len(WAREHOUSES))
+dot_check = inventory_matrix.T @ ones
+
+for region, total in zip(REGIONS, total_inventory_by_region):
+    print(f"{region}: {total:,} units")
+
+print(f"\nDot-product check : {dot_check}")
+print(f"Methods agree     : {np.allclose(total_inventory_by_region, dot_check)}")
+print(f"Network total     : {total_inventory_by_region.sum():,} units")
+```
+
+## Surplus or Shortage Relative to Demand
+
+We just need to subtract the vectors to get the buffer in each region. 
+I calculated the coverage ratio by dividing stock by demand. Since the 
+three regions are different sizes, a flat unit count is not comparable
+across them.
+
+$$
+\mathbf{s} = \mathbf{t} - \mathbf{d}
+\qquad
+\mathbf{c} = \mathbf{t} \oslash \mathbf{d}
+$$
+
+```{python}
+#| label: tbl-surplus
+#| tbl-cap: "Inventory position by region"
+surplus_vector = total_inventory_by_region - demand_vector
+coverage_ratio = total_inventory_by_region / demand_vector
+
+part_a_summary = pd.DataFrame({
+    "Region": REGIONS,
+    "Inventory": total_inventory_by_region,
+    "Demand": demand_vector,
+    "Surplus/Shortage": surplus_vector,
+    "Coverage": coverage_ratio.round(4),
+    "Status": ["Surplus" if s > 0 else "Shortage" if s < 0 else "Exactly Balanced"
+               for s in surplus_vector],
+})
+
+Markdown(part_a_summary.to_markdown(index=False))
+```
+
+## Region Most at Risk
+
+"Most at risk" is the region with the smallest coverage ratio. Ranking on
+the raw difference alone cannot separate region 1 from region 2, since both
+have the same buffer of exactly 300 units, and it also doesn't account for
+the fact that 300 units is noth the same protection against 2800 units of 
+demand or against 2400.
+
+```{python}
+#| label: risk-ranking
+riskiest_idx = int(np.argmin(coverage_ratio))
+riskiest_region = REGIONS[riskiest_idx]
+
+print(f"Most at risk: {riskiest_region}")
+print(f"  buffer   : {surplus_vector[riskiest_idx]:+,} units")
+print(f"  coverage : {coverage_ratio[riskiest_idx]:.4f}")
+
+print("\nRanked most to least at risk:")
+for rank, i in enumerate(np.argsort(coverage_ratio), start=1):
+    print(f"  {rank}. {REGIONS[i]:<8} coverage {coverage_ratio[i]:.4f}, "
+          f"buffer {surplus_vector[i]:+,}")
+```
+
+The region carrying the least protection is **`{python} riskiest_region`** at
+a coverage ratio of `{python} f"{coverage_ratio[riskiest_idx]:.2f}"`.
+
+## Visualization
+
+```{python}
+#| label: fig-inventory
+#| fig-cap: "Inventory position relative to demand. Left: stock and demand side by side. Right: the surplus vector on its own."
+#| fig-width: 9
+#| fig-height: 3.8
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+
+# left side has the inventory against demand
+x = np.arange(len(REGIONS))
+width = 0.38
+axes[0].bar(x - width / 2, total_inventory_by_region, width,
+            label="Available inventory", color="#4C72B0")
+axes[0].bar(x + width / 2, demand_vector, width,
+            label="Demand", color="#DD8452")
+axes[0].set_xticks(x)
+axes[0].set_xticklabels(REGIONS)
+axes[0].set_ylabel("Units")
+axes[0].set_title("Inventory vs. Demand by Region")
+axes[0].legend()
+axes[0].grid(axis="y", alpha=0.3)
+for i in x:
+    axes[0].text(i - width / 2, total_inventory_by_region[i] + 45,
+                 f"{total_inventory_by_region[i]:,}", ha="center", fontsize=8)
+    axes[0].text(i + width / 2, demand_vector[i] + 45,
+                 f"{demand_vector[i]:,}", ha="center", fontsize=8)
+axes[0].set_ylim(0, max(total_inventory_by_region) * 1.15)
+
+# right side had the surplus / shortage vector 
+colors = ["#55A868" if s > 0 else "#C44E52" if s < 0 else "#8172B3"
+          for s in surplus_vector]
+axes[1].bar(REGIONS, surplus_vector, color=colors, width=0.55)
+axes[1].axhline(0, color="black", linewidth=1)
+axes[1].set_ylabel("Units above (+) / below (--) demand")
+axes[1].set_title("Inventory Surplus / Shortage by Region")
+axes[1].grid(axis="y", alpha=0.3)
+for i, s in enumerate(surplus_vector):
+    axes[1].text(i, s + (15 if s >= 0 else -35), f"{s:+,}",
+                 ha="center", fontweight="bold", fontsize=9)
+axes[1].set_ylim(min(surplus_vector) - 100, max(surplus_vector) + 120)
+
+plt.tight_layout()
+plt.show()
+```
+
+## Business Interpretation
+
+Combining the 3 regions, the company holds 8300 units and has a demand of 7700,
+so there is a cushion of 600 units. While the aggregate figure is helpful it 
+can also be misleading since stock sitting in one region can't serve a customer
+in another region. So, it's important to know if there is enough product but also
+if the product is in the right place.
+
+Regions 1 and 2 have a 300 units buffer, but those are not equivalent. Region 1
+has a larger demand, so 300 represents a different percentage of stock in in region
+1 and 2. Region 3 has no buffer, since the demand and stock are exactly the same. 
+If some of the product is damaged or a shipment is slightly late, there will be stockout
+as we can see in fig-inventory.
+
+So, the network doesn't really need more units, it needs different distribution of 
+the product among regions. If 200 or 300 units are moved from region 2 to region 3,
+then all the regions will have a similar protection. Management should use coverage 
+ration to define the safety stock policy instead of flat unit count because a fixed
+protects a small region considerably better than a large one.
+
+## Process Notes {.unnumbered}
+
+::: {.callout-note appearance="simple"}
+### What came up while building Part A
+
+**Reading data from a URL is not the same as reading it from a path.** My
+first working version pointed at a repository folder named `Assignment 1`. A
+raw space is not legal in a URL, so I passed the path through
+`urllib.parse.quote` to encode it as `%20`, and that worked. I then renamed the
+folder to `Assignment1` and deleted the encoding step entirely. The workaround
+was correct but it existed only to accommodate a naming choice I controlled,
+and removing the cause was simpler than carrying the fix. The wider lesson is
+that a path is just a string on disk, while a URL has a grammar, so file and
+folder names that were fine locally become constraints the moment the data is
+served over HTTP.
+
+**The alignment issue I nearly shipped.** My first version read `demand.csv`
+with `demand_df["Demand"].to_numpy()` and subtracted it from the column sums.
+That works here only because both files happen to list the regions in the same
+order. Nothing in the code enforces it. If `demand.csv` listed Region 3 first,
+the subtraction would still run, return three plausible numbers, and be
+silently wrong. 
+
+**Where the math suggested the next step.** I started with the plain difference
+$\mathbf{t} - \mathbf{d}$ and found it could not rank Region 1 against Region
+2, since both showed +300. That dead end is what pushed me toward the coverage
+ratio, and the ratio then exposed something the difference had hidden: the two
+buffers are not equivalent, because they sit against different demand bases.
+The limitation of the first operation is what motivated the second.
+:::
+
+# Part B: Shipment Matrix Analysis
+
+## Constructing the Shipment Matrix
+
+The shipment data forms a second $3 \times 3$ matrix on the same axes as the
+inventory matrix: warehouses on the rows, regions on the columns. Entry
+$s_{ij}$ is the number of units shipped from warehouse $i$ to region $j$.
+
+$$
+\mathbf{S} =
+\begin{bmatrix}
+300 & 400 & 500 \\
+400 & 350 & 250 \\
+500 & 300 & 200
+\end{bmatrix}
+$$
+
+```{python}
+#| label: build-shipment-matrix
+shipment_matrix = shipments_df.set_index("Warehouse").loc[WAREHOUSES, REGIONS].to_numpy()
+
+print("Shipment matrix S (rows = A, B, C | cols = Region1, 2, 3):")
+print(shipment_matrix)
+print("\nShape:", shipment_matrix.shape)
+```
+
+## Row Totals and Column Totals
+
+
+$$
+\mathbf{r} = \mathbf{S}\mathbf{1} \quad \text{(per warehouse)}
+\qquad
+\mathbf{k} = \mathbf{1}^{\top}\mathbf{S} \quad \text{(per region)}
+$$
+
+```{python}
+#| label: row-col-totals
+ones3 = np.ones(3)
+
+row_totals = shipment_matrix @ ones3          
+col_totals = ones3 @ shipment_matrix          
+
+print("Row totals (outbound per warehouse):")
+for w, t in zip(WAREHOUSES, row_totals):
+    print(f"  Warehouse {w}: {t:,.0f} units")
+print("  matches .sum(axis=1):", np.allclose(row_totals, shipment_matrix.sum(axis=1)))
+
+print("\nColumn totals (inbound per region):")
+for r, t in zip(REGIONS, col_totals):
+    print(f"  {r}: {t:,.0f} units")
+print("  matches .sum(axis=0):", np.allclose(col_totals, shipment_matrix.sum(axis=0)))
+
+grand_total = shipment_matrix.sum()
+print(f"\nGrand total            : {grand_total:,} units")
+print(f"Row totals sum to      : {row_totals.sum():,.0f}")
+print(f"Column totals sum to   : {col_totals.sum():,.0f}")
+print(f"Marginals consistent   : "
+      f"{np.isclose(row_totals.sum(), col_totals.sum() ) and np.isclose(row_totals.sum(), grand_total)}")
+```
+
+```{python}
+#| label: tbl-shipment-margins
+#| tbl-cap: "Shipment matrix with row and column totals"
+margin_table = pd.DataFrame(shipment_matrix, index=WAREHOUSES, columns=REGIONS)
+margin_table["Total Shipped"] = row_totals.astype(int)
+margin_table.loc["Total Received"] = list(col_totals.astype(int)) + [int(grand_total)]
+
+Markdown(margin_table.to_markdown())
+```
+
+## Which Warehouse Ships the Most, and Which Region Receives the Most
+
+```{python}
+#| label: identify-max
+top_warehouse_idx = int(np.argmax(row_totals))
+top_region_idx = int(np.argmax(col_totals))
+
+print(f"Highest-volume warehouse : {WAREHOUSES[top_warehouse_idx]} "
+      f"({row_totals[top_warehouse_idx]:,.0f} units, "
+      f"{row_totals[top_warehouse_idx] / grand_total:.1%} of network volume)")
+print(f"Highest-volume region    : {REGIONS[top_region_idx]} "
+      f"({col_totals[top_region_idx]:,.0f} units, "
+      f"{col_totals[top_region_idx] / grand_total:.1%} of network volume)")
+
+
+for label, totals, names in [("warehouses", row_totals, WAREHOUSES),
+                             ("regions", col_totals, REGIONS)]:
+    tied = [n for n, t in zip(names, totals) if np.isclose(t, totals.max())]
+    print(f"\nTies among {label} at the maximum: "
+          f"{tied if len(tied) > 1 else 'none'}")
+
+print("\nFull ranking, outbound by warehouse:")
+for rank, i in enumerate(np.argsort(-row_totals), start=1):
+    print(f"  {rank}. Warehouse {WAREHOUSES[i]}: {row_totals[i]:,.0f}")
+
+print("\nFull ranking, inbound by region:")
+for rank, i in enumerate(np.argsort(-col_totals), start=1):
+    print(f"  {rank}. {REGIONS[i]:<8}: {col_totals[i]:,.0f}")
+```
+
+Warehouse **`{python} WAREHOUSES[top_warehouse_idx]`** ships the most, and
+**`{python} REGIONS[top_region_idx]`** receives the most. Both totals happen to
+equal 1,200 units, which is a coincidence of this dataset and not a
+relationship since one is a row sum and the other a column sum, and they count
+different things.
+
+Warehouses B and C are tied at 1,000 units each. This is worth stating
+explicitly because `np.argmax` returns only the first index at which the
+maximum occurs and would silently hide a tie if one existed at the top.
+
+## Visualization
+
+```{python}
+#| label: fig-shipments
+#| fig-cap: "Shipment flows. Left: the matrix as a heatmap, with lighter cells carrying more volume. Centre: outbound volume by warehouse. Right: inbound volume by region."
+#| fig-width: 9.5
+#| fig-height: 3.6
+fig, axes = plt.subplots(1, 3, figsize=(13, 4.0))
+
+# left - the matrix itself as a heatmap
+im = axes[0].imshow(shipment_matrix, cmap="YlGnBu")
+axes[0].set_xticks(range(3), REGIONS)
+axes[0].set_yticks(range(3), [f"Warehouse {w}" for w in WAREHOUSES])
+axes[0].set_title("Shipment Matrix S")
+for i in range(3):
+    for j in range(3):
+        shade = "white" if shipment_matrix[i, j] > shipment_matrix.mean() else "black"
+        axes[0].text(j, i, f"{shipment_matrix[i, j]:,}",
+                     ha="center", va="center", color=shade, fontweight="bold")
+fig.colorbar(im, ax=axes[0], fraction=0.046, label="Units")
+
+# centre - row totals
+bar_colors = ["#C44E52" if i == top_warehouse_idx else "#4C72B0" for i in range(3)]
+axes[1].bar([f"W-{w}" for w in WAREHOUSES], row_totals, color=bar_colors, width=0.55)
+axes[1].set_title("Outbound Volume by Warehouse")
+axes[1].set_ylabel("Units shipped")
+axes[1].grid(axis="y", alpha=0.3)
+for i, t in enumerate(row_totals):
+    axes[1].text(i, t + 25, f"{t:,.0f}", ha="center", fontsize=9, fontweight="bold")
+axes[1].set_ylim(0, row_totals.max() * 1.18)
+
+# right - column totals 
+bar_colors = ["#C44E52" if i == top_region_idx else "#55A868" for i in range(3)]
+axes[2].bar(REGIONS, col_totals, color=bar_colors, width=0.55)
+axes[2].set_title("Inbound Volume by Region")
+axes[2].set_ylabel("Units received")
+axes[2].grid(axis="y", alpha=0.3)
+for i, t in enumerate(col_totals):
+    axes[2].text(i, t + 25, f"{t:,.0f}", ha="center", fontsize=9, fontweight="bold")
+axes[2].set_ylim(0, col_totals.max() * 1.18)
+
+plt.tight_layout()
+plt.show()
+```
+
+## Business Interpretation
+
+Warehouse A is the network's main concentration point, moving 1,200 units, or 37.5 
+percent of total volume, against 1,000 units each from B and C. That concentration is a
+single point of failure, meaning that a shutdown at A removes more than a third of 
+shipping capacity, and the tie between B and C means there is no obvious second site
+already running at scale to absorb it.
+
+The more useful finding appears when Part B is read against Part A. Region 1
+receives the most inbound volume at 1,200 units and also carries a comfortable
+300-unit buffer. Region 3 receives the least at 950 units and is the one region
+with zero buffer. The region under the most pressure is being served least
+intensively. fig-shipments shows this in the right panel, where inbound volume
+declines across exactly the regions whose coverage ratio is tightening.
+
+Current shipping activity is not aligned with where the inventory risk actually sits,
+and the fix does not require more total volume, only a reallocation of roughly 100 to
+250 units of flow from Region 1 toward Region 3. The heatmap points to where that 
+capacity already exists: warehouse A is Region 3's largest supplier at 500 units, while
+C sends Region 3 only 200, so C is the lane with the most room to grow without
+leaning further on the network's busiest site.
+
+
+# Part C: Resource Allocation Model
+
+Management wants to know how many additional truckloads each warehouse should
+send next week. Let $x$, $y$, and $z$ be the truckloads shipped from warehouses
+A, B, and C respectively, subject to the stated constraints:
+
+$$
+\begin{aligned}
+x + y + z &= 18 \\
+2x + y \phantom{{}+ 2z} &= 26 \\
+y + 2z &= 22
+\end{aligned}
+$$
+
+## Expressing the System in Matrix Form
+
+
+$$
+\underbrace{
+\begin{bmatrix}
+1 & 1 & 1 \\
+2 & 1 & 0 \\
+0 & 1 & 2
+\end{bmatrix}}_{\mathbf{A}}
+\underbrace{
+\begin{bmatrix} x \\ y \\ z \end{bmatrix}}_{\mathbf{x}}
+=
+\underbrace{
+\begin{bmatrix} 18 \\ 26 \\ 22 \end{bmatrix}}_{\mathbf{b}}
+$$
+
+The coefficient matrix $\mathbf{A}$ holds how each warehouse participates in
+each constraint, the variable vector $\mathbf{x}$ holds the three unknown
+truckload counts, and the constants vector $\mathbf{b}$ holds the
+right-hand-side targets. Note the zero entries: warehouse C does not appear in
+the capacity constraint at A, and warehouse A does not appear in the combined
+B-and-C delivery requirement.
+
+```{python}
+#| label: build-system
+A = np.array([
+    [1, 1, 1],   # x +  y +  z = 18   total truckloads available
+    [2, 1, 0],   # 2x +  y      = 26   capacity constraint at warehouse A
+    [0, 1, 2],   #       y + 2z = 22   combined requirement for B and C
+], dtype=float)
+
+b = np.array([18, 26, 22], dtype=float)
+
+print("Coefficient matrix A:")
+print(A)
+print("\nConstants vector b:", b)
+```
+
+## Solving the System Computationally
+
+```{python}
+#| label: attempt-solve
+try:
+    solution = np.linalg.solve(A, b)
+    print("Unique solution found:", solution)
+except np.linalg.LinAlgError as err:
+    print(f"np.linalg.solve raised LinAlgError: {err}")
+    print("\nThe system does not have a unique solution. Diagnosing below.")
+```
+
+`np.linalg.solve` requires a non-singular coefficient matrix. It did not
+produce an answer, so the next step is to establish why rather than to reach
+for a different function.
+
+## Diagnosing the Coefficient Matrix
+
+Three standard diagnostics identify the problem: the determinant, the rank of
+$\mathbf{A}$, and the rank of the augmented matrix $[\mathbf{A} \mid
+\mathbf{b}]$.
+
+```{python}
+#| label: diagnostics
+det_A = np.linalg.det(A)
+rank_A = np.linalg.matrix_rank(A)
+augmented = np.column_stack([A, b])
+rank_aug = np.linalg.matrix_rank(augmented)
+
+print(f"det(A)                   = {det_A:.10f}")
+print(f"rank(A)                  = {rank_A}")
+print(f"rank([A | b])            = {rank_aug}")
+print(f"number of unknowns       = {A.shape[1]}")
+print(f"\nSingular values of A     = {np.linalg.svd(A, compute_uv=False).round(6)}")
+```
+
+The determinant is zero and the rank is 2 rather than 3, so $\mathbf{A}$ is
+singular: its three rows are not linearly independent. The specific dependency
+is visible by inspection once you look for it.
+
+```{python}
+#| label: row-dependency
+print("Row 2 + Row 3 =", A[1] + A[2])
+print("2 x Row 1     =", 2 * A[0])
+print("Rows dependent:", np.allclose(A[1] + A[2], 2 * A[0]))
+
+print("\nThe same combination applied to b:")
+print(f"  b2 + b3 = {b[1] + b[2]:.0f}")
+print(f"  2 x b1  = {2 * b[0]:.0f}")
+print(f"  Consistent: {np.isclose(b[1] + b[2], 2 * b[0])}")
+```
+
+This is the decisive result. The second and third equations sum to exactly
+twice the first on the left-hand side, so the third equation carries no
+information the other two did not already contain. For the system to have any
+solution at all, the constants must satisfy the identical relationship. They do
+not: $26 + 22 = 48$, while $2 \times 18 = 36$.
+
+By the Rouché--Capelli theorem, a system is consistent if and only if
+$\operatorname{rank}(\mathbf{A}) = \operatorname{rank}([\mathbf{A} \mid
+\mathbf{b}])$. Here the ranks are 2 and 3. **The system as given has no
+solution.**
+
+The same conclusion follows from elimination by hand. From the second equation,
+$y = 26 - 2x$. Substituting into the third gives $z = (22 - y)/2 = x - 2$.
+Substituting both into the first:
+
+$$
+x + (26 - 2x) + (x - 2) = 24
+$$
+
+The $x$ terms cancel entirely and the left side reduces to the constant 24,
+while the first equation requires 18. The contradiction $24 = 18$ confirms that
+no triple $(x, y, z)$ satisfies all three constraints simultaneously.
+
+## Verification and Best Approximate Solution
+
+Since no exact solution exists, verifying $\mathbf{A}\mathbf{x} = \mathbf{b}$
+is not possible. What can be computed is the **least-squares** solution, the
+vector that comes closest in the sense of minimising the residual
+$\lVert \mathbf{A}\mathbf{x} - \mathbf{b} \rVert_2$. Unlike
+`np.linalg.solve`, `np.linalg.lstsq` tolerates a singular matrix.
+
+```{python}
+#| label: least-squares
+x_ls, residuals, rank, singular_values = np.linalg.lstsq(A, b, rcond=None)
+
+print("Least-squares solution:")
+for name, val in zip(["x (Warehouse A)", "y (Warehouse B)", "z (Warehouse C)"], x_ls):
+    print(f"  {name}: {val:.4f}")
+
+print(f"\nA @ x_ls          = {(A @ x_ls).round(4)}")
+print(f"target b          = {b}")
+print(f"residual (Ax - b) = {(A @ x_ls - b).round(4)}")
+print(f"||Ax - b||        = {np.linalg.norm(A @ x_ls - b):.4f}")
+print(f"\nExact solution exists: {np.allclose(A @ x_ls, b)}")
+```
+
+The residual is non-zero in every component, which is the numerical
+confirmation that this is an approximation rather than a solution. The
+least-squares vector misses the first constraint by 4 truckloads and overshoots
+the other two by 2 each. It is the closest any vector can come.
+
+## Locating the Error
+
+Knowing the system is inconsistent is not the same as knowing which equation is
+wrong. The rank analysis answers that too.
+
+The dependency runs in a specific direction: the third equation's left-hand
+side is exactly $2\mathbf{r}_1 - \mathbf{r}_2$. That means the third equation
+contains no information independent of the first two --- and, critically, that
+its constant is not free. Once the first two equations are fixed, the third
+one's right-hand side is *forced*:
+
+$$
+2(x + y + z) - (2x + y) = y + 2z
+\qquad\Longrightarrow\qquad
+2(18) - 26 = 10
+$$
+
+```{python}
+#| label: locate-error
+print("Is row 3 a combination of rows 1 and 2?")
+print(f"  2*R1 - R2 = {2 * A[0] - A[1]}")
+print(f"  R3        = {A[2]}")
+print(f"  identical : {np.allclose(2 * A[0] - A[1], A[2])}")
+
+implied_b3 = 2 * b[0] - b[1]
+print(f"\nThe constant in equation 3 is therefore determined, not free:")
+print(f"  implied by eq1 and eq2 : 2*{b[0]:.0f} - {b[1]:.0f} = {implied_b3:.0f}")
+print(f"  stated in the problem  : {b[2]:.0f}")
+print(f"  discrepancy            : {b[2] - implied_b3:.0f}")
+```
+
+**The error is in the third equation.** It should read $y + 2z = 10$, not
+$y + 2z = 22$.
+
+Strictly speaking, any one of the three constants could be the typo: setting
+$b_1 = 24$ or $b_2 = 14$ would also restore consistency, since the requirement
+is only that $b_3 = 2b_1 - b_2$. Equation three is the right place to locate the
+error for two reasons. Mathematically, it is the dependent equation, so it is
+the one whose constant is derived rather than independently given.
+Operationally, correcting it preserves the stated fleet size of 18 truckloads,
+whereas correcting the first equation would require inventing six truckloads of
+capacity that management never claimed to have.
+
+## The Corrected System Still has no unique solution
+
+Fixing the constant removes the contradiction but not the rank deficiency.
+
+```{python}
+#| label: corrected-system
+b_corrected = np.array([18, 26, 10], dtype=float)
+
+print("Corrected system, b =", b_corrected)
+print(f"  rank(A)     = {np.linalg.matrix_rank(A)}")
+print(f"  rank([A|b]) = {np.linalg.matrix_rank(np.column_stack([A, b_corrected]))}")
+print("  ranks now agree -> the system is consistent")
+
+try:
+    np.linalg.solve(A, b_corrected)
+except np.linalg.LinAlgError as err:
+    print(f"\nBut np.linalg.solve still raises: {err}")
+    print("A is unchanged, so it is still singular. Consistency is a property")
+    print("of b; invertibility is a property of A. Fixing one does not fix the other.")
+```
+
+With rank 2 and three unknowns, one degree of freedom survives. Rather than a
+single answer there is a one-parameter family, obtained by treating $x$ as free
+and back-substituting $y = 26 - 2x$ and $z = (10 - y)/2 = x - 8$.
+
+$$
+(x,\, y,\, z) = (t,\; 26 - 2t,\; t - 8), \qquad t \in \mathbb{R}
+$$
+
+```{python}
+#| label: solution-family
+print("General solution: (x, y, z) = (t, 26 - 2t, t - 8)\n")
+
+feasible = []
+for t in range(6, 15):
+    candidate = np.array([t, 26 - 2 * t, t - 8], dtype=float)
+    satisfies = np.allclose(A @ candidate, b_corrected)
+    nonneg = bool((candidate >= 0).all())
+    flag = "feasible" if nonneg else "negative truckloads"
+    print(f"  t={t:>2}: (x,y,z) = {str(candidate.astype(int)):<14} "
+          f"A@x = {(A @ candidate).astype(int)}  solves={satisfies}  {flag}")
+    if nonneg and satisfies:
+        feasible.append(candidate.astype(int))
+
+print("\nTruckloads cannot be negative, which bounds the family:")
+print("  z = t - 8   >= 0  ->  t >= 8")
+print("  y = 26 - 2t >= 0  ->  t <= 13")
+print(f"  feasible integer allocations: {len(feasible)} (t = 8 through 13)")
+```
+
+```{python}
+#| label: tbl-feasible
+#| tbl-cap: "All feasible non-negative integer allocations under the corrected system"
+feasible_df = pd.DataFrame(feasible, columns=["x (Whse A)", "y (Whse B)", "z (Whse C)"])
+feasible_df.insert(0, "t", range(8, 8 + len(feasible)))
+feasible_df["Total"] = feasible_df[["x (Whse A)", "y (Whse B)", "z (Whse C)"]].sum(axis=1)
+
+Markdown(feasible_df.to_markdown(index=False))
+```
+
+Every row totals 18 truckloads, as the first constraint requires. The choice
+among them is not a mathematical question, it is a management decision about
+which warehouse to lean on.
+
+## Business Interpretation
+
+The constraints as written cannot all be satisfied, and no allocation of trucks
+across A, B, and C meets them simultaneously. That is not a computational
+failure but the substantive finding, and it comes with a specific address: the
+third equation is wrong. Its left-hand side is fully determined by the first
+two, so its constant is determined as well, and that forced value is 10 rather
+than the stated 22. Management's combined delivery requirement for warehouses B
+and C overstates by 12 truckloads what the fleet size and warehouse A's
+capacity jointly permit.
+
+Correcting that constant produces a workable plan but not a single one. The
+coefficient matrix is rank 2, so one degree of freedom remains and the answer is
+a family: warehouse A ships $t$ truckloads, b ships $26 - 2t$, and c ships
+$t - 8$. Requiring non-negative loads bounds $t$ between 8 and 13, leaving the
+six allocations in @tbl-feasible. Every one of them totals 18 truckloads and
+satisfies all three constraints.
+
+Which to choose is a management question, and Parts A and B are tied. Region 3 
+has zero inventory buffer and receives the least shipment volume, and warehouse C
+is currently its lightest supplier at 200 units. The allocations at the upper end of
+the range give C the most truckloads, which is where the replenishment capacity for the
+network's weakest region would come from. The lower end concentrates volume at
+B, which does nothing for Region 3. The mathematics narrows eighteen truckloads
+to six viable splits and the operational analysis picks among them.
+
+So the answer to management is neither "here are your numbers" nor "this is
+impossible." It is that one stated requirement is internally inconsistent with
+the other two and needs correcting, and that even once corrected the
+information given is insufficient to determine a unique allocation, which is
+itself useful news as it means there is latitude to optimise for something the
+original constraints never mentioned.
+
+This is why systems of linear equations matter in logistics planning. A network
+of any realistic size accumulates constraints from many sources and no one
+reading them as a list can tell whether they are mutually achievable. Casting
+them as $\mathbf{A}\mathbf{x} = \mathbf{b}$ makes consistency a property that
+can be tested rather than assumed, and it distinguishes three situations that
+look alike on a spreadsheet: one workable plan, many workable plans, or none at
+all. This scenario turned out to be the third masquerading as the first, and
+then the second once repaired. Detecting that before trucks are dispatched is
+worth more than computing a number quickly.
+
+## Process Notes {.unnumbered}
+
+::: {.callout-note appearance="simple"}
+### What came up while building Part C
+
+**I expected a number and got an exception.** `np.linalg.solve` raised
+`LinAlgError: Singular matrix`, which I guess was the single most valuable moment in
+this assignment. My first instinct was that I had built the matrix wrong, so I
+printed $\mathbf{A}$ and checked it row by row against the three equations. It
+was correct. The system itself has no solution.
+
+**Knowing that a solution fails is not the same as knowing why.** Reaching for
+`lstsq` to get some answer would have been the easy move and would have
+produced three plausible-looking numbers with no indication anything was wrong.
+Working through the determinant, then the rank, then the augmented rank, then
+the explicit row dependency turned "it broke" into a specific diagnosis: rows 2
+and 3 sum to twice row 1, so the constants have to as well, and $48 \neq 36$.
+
+**The hand calculation and the computation agreed, which mattered.** Doing the
+elimination on paper produced $24 = 18$, the same contradiction the rank test
+found. I would not have trusted the numerical result on its own, because a zero
+determinant is exactly the situation where floating-point arithmetic is least
+convincing. Two independent routes to the same contradiction is what made me
+confident enough to write it up as a finding rather than a mistake.
+
+
