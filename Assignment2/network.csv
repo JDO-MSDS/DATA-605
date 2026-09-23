@@ -1,0 +1,7 @@
+User,User1,User2,User3,User4,User5,User6
+User1,0,1,1,0,0,0
+User2,1,0,1,1,0,1
+User3,1,1,0,1,1,0
+User4,0,1,1,0,1,0
+User5,0,0,1,1,0,1
+User6,0,1,0,0,1,0
